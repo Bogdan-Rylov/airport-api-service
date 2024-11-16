@@ -1,11 +1,12 @@
 from datetime import datetime
 
+from django.db.models import F, Count
 from drf_spectacular.utils import extend_schema, OpenApiParameter
-from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.viewsets import ModelViewSet
 
+from airport.filters import FlightFilterBackend
 from airport.models import (
     Position,
     CrewMember,
@@ -16,6 +17,7 @@ from airport.models import (
     Flight,
     Order
 )
+from airport.permissions import IsAdmin
 from airport.serializers import (
     PositionSerializer,
     CrewMemberSerializer,
@@ -28,18 +30,21 @@ from airport.serializers import (
     AirplaneRetrieveSerializer,
     AirportSerializer,
     RouteSerializer,
+    RouteListSerializer,
+    RouteRetrieveSerializer,
     FlightSerializer,
+    FlightListSerializer,
+    FlightRetrieveSerializer,
     OrderSerializer,
     OrderListSerializer,
-    FlightListSerializer
+    OrderRetrieveSerializer,
 )
 
 
 class PositionViewSet(ModelViewSet):
     queryset = Position.objects.all()
     serializer_class = PositionSerializer
-
-    # permission_classes = (IsAdmin,)
+    permission_classes = (IsAdmin,)
 
     def list(self, request, *args, **kwargs):
         """Get list of all positions."""
@@ -65,17 +70,17 @@ class PositionViewSet(ModelViewSet):
 class CrewMemberViewSet(ModelViewSet):
     queryset = CrewMember.objects.select_related("position")
     serializer_class = CrewMemberSerializer
-
-    # permission_classes = (IsAdmin,)
+    permission_classes = (IsAdmin,)
 
     def get_serializer_class(self):
+        default_serializer = self.serializer_class
+
         if self.action == "list":
             return CrewMemberListSerializer
-
-        if self.action == "retrieve":
+        elif self.action == "retrieve":
             return CrewMemberRetrieveSerializer
 
-        return CrewMemberSerializer
+        return default_serializer
 
     def list(self, request, *args, **kwargs):
         """Get list of all crew members."""
@@ -101,14 +106,15 @@ class CrewMemberViewSet(ModelViewSet):
 class AirplaneTypeViewSet(ModelViewSet):
     queryset = AirplaneType.objects.all()
     serializer_class = AirplaneTypeSerializer
-
-    # permission_classes = (IsAdmin,)
+    permission_classes = (IsAdmin,)
 
     def get_serializer_class(self):
+        default_serializer = self.serializer_class
+
         if self.action == "list":
             return AirplaneTypeListSerializer
 
-        return AirplaneTypeSerializer
+        return default_serializer
 
     def list(self, request, *args, **kwargs):
         """Get list of all airplane types."""
@@ -136,13 +142,14 @@ class AirplaneViewSet(ModelViewSet):
     serializer_class = AirplaneSerializer
 
     def get_serializer_class(self):
+        default_serializer = self.serializer_class
+
         if self.action == "list":
             return AirplaneListSerializer
-
-        if self.action == "retrieve":
+        elif self.action == "retrieve":
             return AirplaneRetrieveSerializer
 
-        return AirplaneSerializer
+        return default_serializer
 
     def list(self, request, *args, **kwargs):
         """Get list of all airplanes."""
@@ -194,6 +201,16 @@ class RouteViewSet(ModelViewSet):
     queryset = Route.objects.select_related("source", "destination")
     serializer_class = RouteSerializer
 
+    def get_serializer_class(self):
+        default_serializer = self.serializer_class
+
+        if self.action == "list":
+            return RouteListSerializer
+        elif self.action == "retrieve":
+            return RouteRetrieveSerializer
+
+        return default_serializer
+
     def list(self, request, *args, **kwargs):
         """Get list of all routes."""
         return super().list(request, *args, **kwargs)
@@ -223,123 +240,39 @@ class FlightViewSet(ModelViewSet):
             "route__destination",
             "airplane__type"
         )
-        .prefetch_related("crew__position")
     )
+    filter_backends = [FlightFilterBackend]
     serializer_class = FlightSerializer
 
     def get_serializer_class(self):
+        default_serializer = self.serializer_class
+
         if self.action == "list":
             return FlightListSerializer
+        elif self.action == "retrieve":
+            return FlightRetrieveSerializer
 
-        if self.action == "retrieve":
-            return FlightSerializer
-
-        return FlightSerializer
-
-    @staticmethod
-    def _params_to_ints(qs):
-        """Converts a list of string IDs to a list of integers"""
-        return [int(str_id) for str_id in qs.split(",")]
+        return default_serializer
 
     def get_queryset(self):
-        """Get flights with filters"""
-        route = self.request.query_params.get("route")
-        airplane_types = self.request.query_params.get("airplane-types")
-        airplanes = self.request.query_params.get("airplanes")
-        departure_time_from = self.request.query_params.get(
-            "departure-time-from"
-        )
-        departure_time_to = self.request.query_params.get("departure-time-to")
-        arrival_time_from = self.request.query_params.get("arrival-time-from")
-        arrival_time_to = self.request.query_params.get("arrival-time-to")
-
         queryset = self.queryset
 
-        if route:
-            try:
-                route_id = int(route)
-                queryset = queryset.filter(route__id=route_id)
-            except ValueError:
-                return Response(
-                    {"error": "Invalid route ID."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        if self.action == "list":
+            queryset = self.queryset.filter(
+                departure_time__gte=datetime.now()
+            )
 
-        if airplane_types:
-            try:
-                airplane_types_ids = self._params_to_ints(airplane_types)
-                queryset = queryset.filter(
-                    airplane__type__id__in=airplane_types_ids
+            queryset = queryset.annotate(
+                tickets_available=(
+                    F("airplane__type__rows")
+                    * F("airplane__type__seats_in_row")
+                    - Count("tickets")
                 )
-            except ValueError:
-                return Response(
-                    {"error": "Invalid airplane type ID(s)."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            ).order_by("id")
+        elif self.action == "retrieve":
+            queryset = queryset.prefetch_related("crew__position")
 
-        if airplanes:
-            try:
-                airplanes_ids = self._params_to_ints(airplanes)
-                queryset = queryset.filter(airplane__id__in=airplanes_ids)
-            except ValueError:
-                return Response(
-                    {"error": "Invalid airplane ID(s)."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        if departure_time_from:
-            try:
-                departure_time_from_dt = datetime.fromisoformat(
-                    departure_time_from
-                )
-                queryset = queryset.filter(
-                    departure_time__gte=departure_time_from_dt
-                )
-            except ValueError:
-                return Response(
-                    {"error": "Invalid departure time from format."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        if departure_time_to:
-            try:
-                departure_time_to_dt = datetime.fromisoformat(
-                    departure_time_to
-                )
-                queryset = queryset.filter(
-                    departure_time__lte=departure_time_to_dt
-                )
-            except ValueError:
-                return Response(
-                    {"error": "Invalid departure time to format."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        if arrival_time_from:
-            try:
-                arrival_time_from_dt = datetime.fromisoformat(
-                    arrival_time_from
-                )
-                queryset = queryset.filter(
-                    arrival_time__gte=arrival_time_from_dt
-                )
-            except ValueError:
-                return Response(
-                    {"error": "Invalid 'arrival time from' format."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        if arrival_time_to:
-            try:
-                arrival_time_to_dt = datetime.fromisoformat(arrival_time_to)
-                queryset = queryset.filter(
-                    arrival_time__lte=arrival_time_to_dt
-                )
-            except ValueError:
-                return Response(
-                    {"error": "Invalid arrival time to format."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        return queryset.distinct()
+        return queryset
 
     @extend_schema(
         description="Retrieve a list of flights.",
@@ -352,7 +285,9 @@ class FlightViewSet(ModelViewSet):
             OpenApiParameter(
                 name="airplane-types",
                 type={"type": "array", "items": {"type": "number"}},
-                description="Filter by airplane type IDs (ex. ?airplane-types=1,2)"
+                description=(
+                    "Filter by airplane type IDs (ex. ?airplane-types=1,2)"
+                )
             ),
             OpenApiParameter(
                 name="airplanes",
@@ -362,22 +297,34 @@ class FlightViewSet(ModelViewSet):
             OpenApiParameter(
                 name="departure_time_from",
                 type={"type": "string", "format": "date-time"},
-                description="Filter by departure time from (ex. ?departure_time_from=2024-10-15T10:00:00)"
+                description=(
+                    "Filter by departure time from "
+                    "(ex. ?departure_time_from=2024-10-15T10:00:00)"
+                )
             ),
             OpenApiParameter(
                 name="departure_time_to",
                 type={"type": "string", "format": "date-time"},
-                description="Filter by departure time to (ex. ?departure_time_to=2024-10-15T12:00:00)"
+                description=(
+                    "Filter by departure time to "
+                    "(ex. ?departure_time_to=2024-10-15T12:00:00)"
+                )
             ),
             OpenApiParameter(
                 name="arrival_time_from",
                 type={"type": "string", "format": "date-time"},
-                description="Filter by arrival time from (ex. ?arrival_time_from=2024-10-15T10:00:00)"
+                description=(
+                    "Filter by arrival time from "
+                    "(ex. ?arrival_time_from=2024-10-15T10:00:00)"
+                )
             ),
             OpenApiParameter(
                 name="arrival_time_to",
                 type={"type": "string", "format": "date-time"},
-                description="Filter by arrival time to (ex. ?arrival_time_to=2024-10-15T12:00:00)"
+                description=(
+                    "Filter by arrival time to "
+                    "(ex. ?arrival_time_to=2024-10-15T12:00:00)"
+                )
             ),
         ]
     )
@@ -406,25 +353,36 @@ class FlightViewSet(ModelViewSet):
 
 
 class OrderPagination(PageNumberPagination):
-    page_size = 10
-    max_page_size = 100
+    page_size = 7
+    max_page_size = 20
 
 
 class OrderViewSet(ModelViewSet):
-    queryset = Order.objects.prefetch_related(
-        "tickets__flight__route", "tickets__flight__airplane"
-    )
+    queryset = Order.objects.all()
     serializer_class = OrderSerializer
     pagination_class = OrderPagination
+    permission_classes = (IsAuthenticated,)
 
     def get_queryset(self):
-        return Order.objects.filter(user=self.request.user)
+        queryset = self.queryset.filter(user=self.request.user)
+
+        if self.action in ("list", "retrieve"):
+            queryset = queryset.prefetch_related(
+                "tickets__flight__route",
+                "tickets__flight__airplane"
+            )
+
+        return queryset
 
     def get_serializer_class(self):
+        default_serializer = self.serializer_class
+
         if self.action == "list":
             return OrderListSerializer
+        elif self.action == "retrieve":
+            return OrderRetrieveSerializer
 
-        return OrderSerializer
+        return default_serializer
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)

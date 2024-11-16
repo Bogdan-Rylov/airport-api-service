@@ -33,7 +33,8 @@ class CrewMemberSerializer(serializers.ModelSerializer):
             "date_of_birth",
             "position",
             "hiring_date",
-            "experience"
+            "previous_experience",
+            "total_experience"
         )
 
 
@@ -46,7 +47,7 @@ class CrewMemberListSerializer(serializers.ModelSerializer):
 
 
 class CrewMemberRetrieveSerializer(CrewMemberSerializer):
-    position = PositionSerializer(many=False, read_only=True)
+    position = PositionSerializer(read_only=True)
 
 
 class AirplaneTypeSerializer(serializers.ModelSerializer):
@@ -74,6 +75,17 @@ class AirplaneTypeListSerializer(serializers.ModelSerializer):
 
 
 class AirplaneSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs=attrs)
+        Airplane.validate_airplane(
+            attrs["manufacture_date"],
+            attrs["operation_start_date"],
+            attrs["last_maintenance_date"],
+            ValidationError
+        )
+
+        return data
+
     class Meta:
         model = Airplane
         fields = (
@@ -83,12 +95,12 @@ class AirplaneSerializer(serializers.ModelSerializer):
             "serial_number",
             "manufacture_date",
             "operation_start_date",
-            "last_maintenance"
+            "last_maintenance_date"
         )
 
 
 class AirplaneListSerializer(serializers.ModelSerializer):
-    type = AirplaneTypeListSerializer(many=False, read_only=True)
+    type = AirplaneTypeListSerializer(read_only=True)
 
     class Meta:
         model = Airplane
@@ -101,7 +113,7 @@ class AirplaneListSerializer(serializers.ModelSerializer):
 
 
 class AirplaneRetrieveSerializer(AirplaneSerializer):
-    type = AirplaneTypeSerializer(many=False, read_only=True)
+    type = AirplaneTypeSerializer(read_only=True)
 
 
 class AirportSerializer(serializers.ModelSerializer):
@@ -111,18 +123,50 @@ class AirportSerializer(serializers.ModelSerializer):
 
 
 class RouteSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs=attrs)
+        Route.validate_route(
+            attrs["source"],
+            attrs["destination"],
+            ValidationError
+        )
+
+        return data
+
     class Meta:
         model = Route
         fields = ("id", "source", "destination", "distance")
 
 
 class RouteListSerializer(serializers.ModelSerializer):
+    source = serializers.StringRelatedField()
+    destination = serializers.StringRelatedField()
+
+    class Meta:
+        model = Route
+        fields = ("id", "source", "destination", "distance")
+
+
+class RouteRetrieveSerializer(serializers.ModelSerializer):
+    source = AirportSerializer()
+    destination = AirportSerializer()
+
     class Meta:
         model = Route
         fields = ("id", "source", "destination", "distance")
 
 
 class FlightSerializer(serializers.ModelSerializer):
+    def validate(self, attrs):
+        data = super().validate(attrs=attrs)
+        Flight.validate_flight(
+            attrs["departure_time"],
+            attrs["arrival_time"],
+            ValidationError
+        )
+
+        return data
+
     class Meta:
         model = Flight
         fields = (
@@ -138,6 +182,7 @@ class FlightSerializer(serializers.ModelSerializer):
 class FlightListSerializer(serializers.ModelSerializer):
     route = serializers.CharField(source="route.info", read_only=True)
     airplane = serializers.CharField(source="airplane.info", read_only=True)
+    tickets_available = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Flight
@@ -146,7 +191,8 @@ class FlightListSerializer(serializers.ModelSerializer):
             "route",
             "airplane",
             "departure_time",
-            "arrival_time"
+            "arrival_time",
+            "tickets_available"
         )
 
 
@@ -159,6 +205,7 @@ class TicketSerializer(serializers.ModelSerializer):
             attrs["flight"].airplane.type,
             ValidationError
         )
+
         return data
 
     class Meta:
@@ -167,7 +214,11 @@ class TicketSerializer(serializers.ModelSerializer):
 
 
 class TicketListSerializer(TicketSerializer):
-    flight = FlightListSerializer(many=False, read_only=True)
+    flight = serializers.CharField(source="flight.display", read_only=True)
+
+
+class TicketRetrieveSerializer(TicketSerializer):
+    flight = FlightListSerializer(read_only=True)
 
 
 class TicketSeatsSerializer(TicketSerializer):
@@ -176,12 +227,13 @@ class TicketSeatsSerializer(TicketSerializer):
         fields = ("row", "seat")
 
 
-class FlightDetailSerializer(FlightSerializer):
-    route = RouteListSerializer(many=False, read_only=True)
-    airplane = AirplaneSerializer(many=False, read_only=True)
+class FlightRetrieveSerializer(FlightSerializer):
+    route = RouteListSerializer(read_only=True)
+    airplane = AirplaneSerializer(read_only=True)
     taken_places = TicketSeatsSerializer(
         source="tickets", many=True, read_only=True
     )
+    crew = CrewMemberListSerializer(many=True, read_only=True)
 
     class Meta:
         model = Flight
@@ -214,3 +266,7 @@ class OrderSerializer(serializers.ModelSerializer):
 
 class OrderListSerializer(OrderSerializer):
     tickets = TicketListSerializer(many=True, read_only=True)
+
+
+class OrderRetrieveSerializer(OrderSerializer):
+    tickets = TicketRetrieveSerializer(many=True, read_only=True)

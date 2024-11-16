@@ -1,60 +1,105 @@
+from datetime import date, datetime
 from typing import Callable
 
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
-from rest_framework.exceptions import ValidationError
+
+from airport.validators import (
+    validate_minimum_age_from_birthdate,
+    validate_positive_number,
+    validate_normalized_string,
+    validate_date_not_in_future,
+    validate_iata_code,
+)
+
 
 User = get_user_model()
 
 
 class Position(models.Model):
-    name = models.CharField(max_length=255, unique=True)
+    name = models.CharField(
+        max_length=127,
+        unique=True,
+        validators=[validate_normalized_string]
+    )
     description = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return self.name
 
-    class Meta:
-        ordering = ["name"]
-
 
 class CrewMember(models.Model):
-    GENDER_CHOICES = [
-        ("M", "Male"),
-        ("F", "Female"),
-    ]
+    class Gender(models.TextChoices):
+        MALE = "M", "Male"
+        FEMALE = "F", "Female"
 
-    license_number = models.CharField(max_length=100, unique=True)
-    first_name = models.CharField(max_length=255)
-    last_name = models.CharField(max_length=255)
-    gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
-    date_of_birth = models.DateField()
+    license_number = models.CharField(max_length=127, unique=True)
+    first_name = models.CharField(
+        max_length=127,
+        validators=[validate_normalized_string]
+    )
+    last_name = models.CharField(
+        max_length=127,
+        validators=[validate_normalized_string]
+    )
+    gender = models.CharField(max_length=1, choices=Gender.choices)
+    date_of_birth = models.DateField(
+        validators=[validate_minimum_age_from_birthdate]
+    )
     position = models.ForeignKey(
         Position,
         on_delete=models.SET_NULL,
         related_name="crew_members",
+        blank=True,
         null=True
     )
-    hiring_date = models.DateField(blank=True, null=True)
-    experience = models.IntegerField(blank=True, null=True)
+    hiring_date = models.DateField(
+        blank=True,
+        null=True,
+        validators=[validate_date_not_in_future]
+    )
+    previous_experience = models.IntegerField(
+        blank=True,
+        null=True,
+        validators=[validate_positive_number]
+    )
 
     @property
     def full_name(self) -> str:
         return f"{self.first_name} {self.last_name}"
 
+    @property
+    def total_experience(self) -> int:
+        """Calculate total work experience."""
+        total = self.previous_experience if self.previous_experience else 0
+
+        if self.hiring_date:
+            years_since_hiring = (date.today() - self.hiring_date).days // 365
+            total += years_since_hiring
+
+        return total
+
     def __str__(self):
         return f"{self.full_name} ({self.position})"
 
     class Meta:
-        ordering = ["last_name"]
+        verbose_name = "Crew Member"
+        verbose_name_plural = "Crew Members"
 
 
 class AirplaneType(models.Model):
-    model = models.CharField(max_length=255)
-    manufacturer = models.CharField(max_length=255)
-    rows = models.IntegerField()
-    seats_in_row = models.IntegerField()
+    model = models.CharField(
+        max_length=63,
+        validators=[validate_normalized_string]
+    )
+    manufacturer = models.CharField(
+        max_length=127,
+        validators=[validate_normalized_string]
+    )
+    rows = models.IntegerField(validators=[validate_positive_number])
+    seats_in_row = models.IntegerField(validators=[validate_positive_number])
 
     @property
     def capacity(self) -> int:
@@ -79,11 +124,16 @@ class Airplane(models.Model):
         on_delete=models.CASCADE,
         related_name="airplanes"
     )
-    name = models.CharField(max_length=255, blank=True, null=True)
-    serial_number = models.CharField(max_length=100, unique=True)
+    name = models.CharField(
+        max_length=127,
+        blank=True,
+        null=True,
+        validators=[validate_normalized_string]
+    )
+    serial_number = models.CharField(max_length=127, unique=True)
     manufacture_date = models.DateField(blank=True, null=True)
     operation_start_date = models.DateField(blank=True, null=True)
-    last_maintenance = models.DateField(blank=True, null=True)
+    last_maintenance_date = models.DateField(blank=True, null=True)
 
     @property
     def age(self) -> int:
@@ -97,21 +147,92 @@ class Airplane(models.Model):
     def __str__(self):
         return self.info
 
+    @staticmethod
+    def validate_airplane(
+        manufacture_date: date,
+        operation_start_date: date,
+        last_maintenance_date: date,
+        error_to_raise: Callable
+    ) -> None:
+        if operation_start_date and manufacture_date:
+            if operation_start_date < manufacture_date:
+                raise error_to_raise(
+                    {
+                        "operation_start_date": (
+                            "Operation start date cannot be earlier than "
+                            "manufacture date."
+                        )
+                    }
+                )
+
+        if last_maintenance_date and manufacture_date:
+            if last_maintenance_date < manufacture_date:
+                raise error_to_raise(
+                    {
+                        "last_maintenance": (
+                            "Last maintenance date cannot be earlier than "
+                            "manufacture date."
+                        )
+                    }
+                )
+
+        if operation_start_date and last_maintenance_date:
+            if operation_start_date > last_maintenance_date:
+                raise error_to_raise(
+                    {
+                        "operation_start_date": (
+                            "Operation start date cannot be later than last "
+                            "maintenance date."
+                        )
+                    }
+                )
+
+    def clean(self):
+        Airplane.validate_airplane(
+            self.manufacture_date,
+            self.operation_start_date,
+            self.last_maintenance_date,
+            ValidationError
+        )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
     class Meta:
         ordering = ["serial_number"]
 
 
 class Airport(models.Model):
-    name = models.CharField(max_length=255)
-    city = models.CharField(max_length=255)
-    country = models.CharField(max_length=255)
-    iata_code = models.CharField(max_length=3, unique=True)
+    name = models.CharField(
+        max_length=127,
+        validators=[validate_normalized_string]
+    )
+    city = models.CharField(
+        max_length=63,
+        validators=[validate_normalized_string]
+    )
+    country = models.CharField(
+        max_length=63,
+        validators=[validate_normalized_string]
+    )
+    iata_code = models.CharField(
+        max_length=3,
+        unique=True,
+        validators=[validate_iata_code]
+    )
 
     def __str__(self):
-        return f"{self.name} ({self.city} - {self.country}) [{self.iata_code}]"
+        return f"{self.name} ({self.iata_code} - {self.city}, {self.country})"
 
     class Meta:
         ordering = ["country", "city", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["country", "city", "name"],
+                name="unique_country_city_name"
+            )
+        ]
 
 
 class Route(models.Model):
@@ -125,10 +246,11 @@ class Route(models.Model):
         on_delete=models.CASCADE,
         related_name="routes_to"
     )
-    distance = models.IntegerField(blank=True, null=True)
-
-    def __str__(self):
-        return self.info
+    distance = models.IntegerField(
+        blank=True,
+        null=True,
+        validators=[validate_positive_number]
+    )
 
     @property
     def info(self) -> str:
@@ -137,14 +259,29 @@ class Route(models.Model):
             f"{self.destination.city} ({self.destination.iata_code})"
         )
 
-    def clean(self):
-        if self.source == self.destination:
-            raise ValidationError(
-                "Source and destination airports cannot be the same.")
-        if self.distance is not None and self.distance < 0:
-            raise ValidationError(
-                "Distance cannot be negative."
+    def __str__(self):
+        return self.info
+
+    @staticmethod
+    def validate_route(
+        source: Airport,
+        destination: Airport,
+        error_to_raise: Callable
+    ) -> None:
+        if source == destination:
+            raise error_to_raise(
+                {
+                    "destination": f"Source and destination airports cannot "
+                                   f"be the same."
+                }
             )
+
+    def clean(self):
+        Route.validate_route(self.source, self.destination, ValidationError)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ["source"]
@@ -171,16 +308,40 @@ class Flight(models.Model):
     departure_time = models.DateTimeField()
     arrival_time = models.DateTimeField()
 
+    @property
+    def display(self) -> str:
+        return self.__str__()
+
     def __str__(self):
         return (
             f"{self.route}. Departure: {self.departure_time}. "
             f"Arrival: {self.arrival_time}"
         )
 
+    @staticmethod
+    def validate_flight(
+        departure_time: datetime,
+        arrival_time: datetime,
+        error_to_raise: Callable
+    ) -> None:
+        if departure_time >= arrival_time:
+            raise error_to_raise(
+                {
+                    "arrival_time": "Departure time must be earlier than "
+                                    "arrival time."
+                }
+            )
+
     def clean(self):
-        if self.departure_time >= self.arrival_time:
-            raise ValidationError(
-                "Departure time must be earlier than arrival time.")
+        Flight.validate_flight(
+            self.departure_time,
+            self.arrival_time,
+            ValidationError
+        )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ["-departure_time"]
@@ -203,10 +364,14 @@ class Order(models.Model):
 
 class Ticket(models.Model):
     order = models.ForeignKey(
-        Order, on_delete=models.CASCADE, related_name="tickets"
+        Order,
+        on_delete=models.CASCADE,
+        related_name="tickets"
     )
     flight = models.ForeignKey(
-        Flight, on_delete=models.CASCADE, related_name="tickets"
+        Flight,
+        on_delete=models.CASCADE,
+        related_name="tickets"
     )
     row = models.IntegerField()
     seat = models.IntegerField()
@@ -222,7 +387,7 @@ class Ticket(models.Model):
         seat: int,
         airplane_type: AirplaneType,
         error_to_raise: Callable
-    ):
+    ) -> None:
         for ticket_attr_value, ticket_attr_name, airplane_type_attr_name in [
             (row, "row", "rows"),
             (seat, "seat", "seats_in_row"),
@@ -246,22 +411,9 @@ class Ticket(models.Model):
             ValidationError,
         )
 
-    def save(
-        self,
-        *args,
-        force_insert=False,
-        force_update=False,
-        using=None,
-        update_fields=None
-    ):
+    def save(self, *args, **kwargs):
         self.full_clean()
-        return super().save(
-            *args,
-            force_insert=force_insert,
-            force_update=force_update,
-            using=using,
-            update_fields=update_fields
-        )
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ["row", "seat"]
