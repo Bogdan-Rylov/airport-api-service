@@ -90,10 +90,7 @@ class CrewMember(models.Model):
 
 
 class AirplaneType(models.Model):
-    model = models.CharField(
-        max_length=63,
-        validators=[validate_normalized_string]
-    )
+    model = models.CharField(max_length=63)
     manufacturer = models.CharField(
         max_length=127,
         validators=[validate_normalized_string]
@@ -149,9 +146,9 @@ class Airplane(models.Model):
 
     @staticmethod
     def validate_airplane(
-        manufacture_date: date,
-        operation_start_date: date,
-        last_maintenance_date: date,
+        manufacture_date: date | None,
+        operation_start_date: date | None,
+        last_maintenance_date: date | None,
         error_to_raise: Callable
     ) -> None:
         if operation_start_date and manufacture_date:
@@ -294,7 +291,6 @@ class Route(models.Model):
 
 
 class Flight(models.Model):
-    crew = models.ManyToManyField(CrewMember, related_name="flights")
     route = models.ForeignKey(
         Route,
         on_delete=models.CASCADE,
@@ -307,6 +303,7 @@ class Flight(models.Model):
     )
     departure_time = models.DateTimeField()
     arrival_time = models.DateTimeField()
+    crew = models.ManyToManyField(CrewMember, related_name="flights")
 
     @property
     def display(self) -> str:

@@ -78,9 +78,9 @@ class AirplaneSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         data = super().validate(attrs=attrs)
         Airplane.validate_airplane(
-            attrs["manufacture_date"],
-            attrs["operation_start_date"],
-            attrs["last_maintenance_date"],
+            attrs.get("manufacture_date"),
+            attrs.get("operation_start_date"),
+            attrs.get("last_maintenance_date"),
             ValidationError
         )
 
